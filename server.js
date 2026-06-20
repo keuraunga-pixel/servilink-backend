@@ -544,6 +544,173 @@ app.get('/api/chat/non-lus/:userId', (req, res) => {
   res.json({ success: true, total });
 });
 
+// ==================== BOUTIQUE & PRODUITS ====================
+
+// Créer un produit
+app.post('/api/produits', (req, res) => {
+  const db = read();
+  const produit = {
+    id: 'prod_' + Date.now(),
+    prestataireId: req.body.prestataireId,
+    prestataireNom: req.body.prestataireNom || '',
+    nom: req.body.nom,
+    description: req.body.description || '',
+    prix: parseFloat(req.body.prix) || 0,
+    stock: parseInt(req.body.stock) || 0,
+    categorie: req.body.categorie || 'Divers',
+    photos: req.body.photos || [],
+    livraisonDisponible: req.body.livraisonDisponible === true,
+    fraisLivraison: parseFloat(req.body.fraisLivraison) || 0,
+    actif: true,
+    dateCreation: new Date().toISOString()
+  };
+  if (!db.produits) db.produits = [];
+  db.produits.push(produit);
+  write(db);
+  res.status(201).json({ success: true, produit });
+});
+
+// Lister les produits d'un prestataire
+app.get('/api/produits/prestataire/:userId', (req, res) => {
+  const db = read();
+  const produits = (db.produits || []).filter(p => p.prestataireId === req.params.userId && p.actif);
+  res.json({ success: true, produits });
+});
+
+// Lister tous les produits
+app.get('/api/produits', (req, res) => {
+  const db = read();
+  const produits = (db.produits || []).filter(p => p.actif);
+  res.json({ success: true, produits });
+});
+
+// Page boutique personnalisée
+app.get('/api/boutique/:userId', (req, res) => {
+  const db = read();
+  const prestataire = db.users.find(u => u.id === req.params.userId);
+  if (!prestataire) return res.status(404).json({ success: false, message: 'Non trouvé' });
+  
+  const services = db.services.filter(s => s.prestataireId === req.params.userId);
+  const produits = (db.produits || []).filter(p => p.prestataireId === req.params.userId && p.actif);
+  const notes = db.orders.filter(o => o.prestataireId === req.params.userId && o.note);
+  const noteMoyenne = notes.length > 0 ? notes.reduce((s, o) => s + o.note, 0) / notes.length : 0;
+  
+  res.json({
+    success: true,
+    boutique: {
+      prestataire: {
+        id: prestataire.id,
+        nom: prestataire.nom,
+        prenom: prestataire.prenom,
+        photo: prestataire.photo,
+        ville: prestataire.adresse?.ville || '',
+        verified: prestataire.verified,
+        badgeVerifie: prestataire.badgeVerifie,
+        noteMoyenne: Math.round(noteMoyenne * 10) / 10,
+        totalNotes: notes.length,
+        commandesReussies: prestataire.commandesReussies || 0,
+      },
+      services,
+      produits,
+      totalServices: services.length,
+      totalProduits: (produits || []).length,
+    }
+  });
+});
+
+// ==================== PANIER ====================
+app.post('/api/panier/add', (req, res) => {
+  const db = read();
+  if (!db.paniers) db.paniers = [];
+  
+  let panier = db.paniers.find(p => p.userId === req.body.userId && p.statut === 'actif');
+  if (!panier) {
+    panier = {
+      id: 'panier_' + Date.now(),
+      userId: req.body.userId,
+      items: [],
+      statut: 'actif',
+      dateCreation: new Date().toISOString()
+    };
+    db.paniers.push(panier);
+  }
+  
+  panier.items.push({
+    type: req.body.type || 'service', // 'service' ou 'produit'
+    itemId: req.body.itemId,
+    nom: req.body.nom || '',
+    prix: parseFloat(req.body.prix) || 0,
+    quantite: parseInt(req.body.quantite) || 1,
+    prestataireId: req.body.prestataireId,
+    prestataireNom: req.body.prestataireNom || '',
+  });
+  
+  write(db);
+  res.json({ success: true, panier });
+});
+
+// Voir le panier
+app.get('/api/panier/:userId', (req, res) => {
+  const db = read();
+  const panier = (db.paniers || []).find(p => p.userId === req.params.userId && p.statut === 'actif');
+  res.json({ success: true, panier: panier || { items: [] } });
+});
+
+// Supprimer un item du panier
+app.delete('/api/panier/:userId/item/:index', (req, res) => {
+  const db = read();
+  const panier = (db.paniers || []).find(p => p.userId === req.params.userId && p.statut === 'actif');
+  if (panier) {
+    panier.items.splice(parseInt(req.params.index), 1);
+    write(db);
+  }
+  res.json({ success: true, panier });
+});
+
+// Vider le panier
+app.delete('/api/panier/:userId', (req, res) => {
+  const db = read();
+  const idx = (db.paniers || []).findIndex(p => p.userId === req.params.userId && p.statut === 'actif');
+  if (idx !== -1) {
+    db.paniers.splice(idx, 1);
+    write(db);
+  }
+  res.json({ success: true, message: 'Panier vidé' });
+});
+
+// ==================== SUIVI DE LIVRAISON ====================
+app.put('/api/orders/:id/livraison', (req, res) => {
+  const db = read();
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Commande non trouvée' });
+  
+  order.suiviLivraison = {
+    statut: req.body.statut || 'en_preparation', // 'en_preparation', 'en_cours', 'livre'
+    position: req.body.position || null, // { lat: 3.848, lng: 11.502 }
+    tempsEstime: req.body.tempsEstime || '30 min',
+    message: req.body.message || '',
+    derniereMiseAJour: new Date().toISOString()
+  };
+  
+  write(db);
+  res.json({ success: true, order });
+});
+
+app.get('/api/orders/:id/suivi', (req, res) => {
+  const db = read();
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Commande non trouvée' });
+  
+  res.json({
+    success: true,
+    suivi: order.suiviLivraison || {
+      statut: 'en_attente',
+      message: 'Commande en attente de confirmation',
+      derniereMiseAJour: order.createdAt
+    }
+  });
+});
+
 // ==================== DÉMARRAGE ====================
 const PORT = process.env.PORT || 5002;
 server.listen(PORT, () => {
@@ -552,6 +719,9 @@ server.listen(PORT, () => {
   console.log(`🔔 Notifications push ${fcmReady ? 'ACTIVÉES' : 'non configurées'}`);
   console.log(`💰 Mes Gains ACTIVÉS`);
   console.log(`🛎️ Badge notifications ACTIVÉ`);
+  console.log(`🛒 Panier multi-services ACTIVÉ`);
+  console.log(`🏪 Boutique personnalisée ACTIVÉE`);
+  console.log(`📦 Suivi de livraison ACTIVÉ`);
   console.log(`💳 Paiement Mobile Money Cameroun INTÉGRÉ`);
   console.log(`📸 Système de preuves (client + prestataire) ACTIVÉ`);
   console.log(`📄 Factures ACTIVÉES`);
