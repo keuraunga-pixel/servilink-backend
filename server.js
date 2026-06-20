@@ -25,31 +25,11 @@ const read = () => JSON.parse(fs.readFileSync(DB));
 const write = (d) => fs.writeFileSync(DB, JSON.stringify(d, null, 2));
 
 // ==================== FIREBASE (NOTIFICATIONS PUSH) ====================
-const admin = require('firebase-admin');
 let fcmReady = false;
-try {
-  const serviceAccount = require('./firebase-key.json');
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-  fcmReady = true;
-  console.log('✅ Firebase prêt');
-} catch (e) {
-  console.log('⚠️ Firebase non configuré (firebase-key.json manquant)');
-}
+console.log('⚠️ Firebase désactivé (clé non configurée)');
 
 async function sendPush(userId, title, body, data = {}) {
-  if (!fcmReady) return;
-  const db = read();
-  const user = db.users.find(u => u.id === userId);
-  if (!user?.fcmToken) return;
-  try {
-    await admin.messaging().send({
-      token: user.fcmToken,
-      notification: { title, body },
-      data,
-      android: { priority: 'high' },
-    });
-    console.log(`🔔 Push: ${user.prenom} - ${title}`);
-  } catch (e) { console.error('Push error:', e.message); }
+  // Firebase non configuré
 }
 
 // ==================== CONFIG MOBILE MONEY CAMEROUN ====================
