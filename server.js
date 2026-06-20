@@ -18,11 +18,39 @@ app.use(express.static(__dirname + '/public'));
 
 const DB = __dirname + '/db.json';
 if (!fs.existsSync(DB)) {
-  fs.writeFileSync(DB, '{"users":[],"services":[],"orders":[],"categories":[],"reports":[],"revenus":{"total":0,"commissions":0,"urgences":0,"parrainages":0,"abonnements":0,"boosts":0,"publicites":0},"conversations":[],"messages":[],"publicites":[]}');
+  fs.writeFileSync(DB, '{"users":[],"services":[],"orders":[],"categories":[],"reports":[],"revenus":{"total":0,"commissions":0,"urgences":0,"parrainages":0,"abonnements":0,"boosts":0,"publicites":0},"conversations":[],"messages":[],"publicites":[],"stories":[],"devis":[]}');
 }
 
 const read = () => JSON.parse(fs.readFileSync(DB));
 const write = (d) => fs.writeFileSync(DB, JSON.stringify(d, null, 2));
+
+// ==================== FIREBASE (NOTIFICATIONS PUSH) ====================
+const admin = require('firebase-admin');
+let fcmReady = false;
+try {
+  const serviceAccount = require('./firebase-key.json');
+  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  fcmReady = true;
+  console.log('✅ Firebase prêt');
+} catch (e) {
+  console.log('⚠️ Firebase non configuré (firebase-key.json manquant)');
+}
+
+async function sendPush(userId, title, body, data = {}) {
+  if (!fcmReady) return;
+  const db = read();
+  const user = db.users.find(u => u.id === userId);
+  if (!user?.fcmToken) return;
+  try {
+    await admin.messaging().send({
+      token: user.fcmToken,
+      notification: { title, body },
+      data,
+      android: { priority: 'high' },
+    });
+    console.log(`🔔 Push: ${user.prenom} - ${title}`);
+  } catch (e) { console.error('Push error:', e.message); }
+}
 
 // ==================== CONFIG MOBILE MONEY CAMEROUN ====================
 const MOMO_CONFIG = {
@@ -67,29 +95,29 @@ async function checkMomoStatus(token, referenceId) {
 global.onlineUsers = new Map();
 global.io = io;
 
-// ==================== SOCKET.IO - CHAT ====================
+// ==================== SOCKET.IO - CHAT (avec audio) ====================
 io.on('connection', (socket) => {
   console.log(`🔌 Nouvelle connexion socket: ${socket.id}`);
   socket.on('register-user', (userId) => { global.onlineUsers.set(userId, socket.id); console.log(`✅ Utilisateur ${userId} en ligne`); });
   socket.on('send-message', (data) => {
     try {
-      const { conversationId, expediteurId, destinataireId, contenu, commandeId } = data;
+      const { conversationId, expediteurId, destinataireId, contenu, commandeId, type, audioUrl } = data;
       const db = read();
       let conversation = null;
       if (conversationId) conversation = db.conversations?.find(c => c.id === conversationId);
       if (!conversation && commandeId) conversation = db.conversations?.find(c => c.commande_id === commandeId);
       if (!conversation) {
-        conversation = { id: 'conv_' + Date.now() + '_' + expediteurId, client_id: expediteurId, prestataire_id: destinataireId, commande_id: commandeId || null, date_creation: new Date().toISOString(), dernier_message: contenu, dernier_message_date: new Date().toISOString(), non_lus_client: 0, non_lus_prestataire: 0 };
+        conversation = { id: 'conv_' + Date.now() + '_' + expediteurId, client_id: expediteurId, prestataire_id: destinataireId, commande_id: commandeId || null, date_creation: new Date().toISOString(), dernier_message: type === 'audio' ? '🎤 Message vocal' : (contenu || ''), dernier_message_date: new Date().toISOString(), non_lus_client: 0, non_lus_prestataire: 0 };
         if (!db.conversations) db.conversations = [];
         db.conversations.push(conversation);
       }
-      const message = { id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2,6), conversation_id: conversation.id, expediteur_id: expediteurId, destinataire_id: destinataireId, contenu, type: 'text', lu: false, date_envoi: new Date().toISOString(), piece_jointe_url: null };
+      const message = { id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2,6), conversation_id: conversation.id, expediteur_id: expediteurId, destinataire_id: destinataireId, contenu: contenu || '', type: type || 'text', audioUrl: audioUrl || null, lu: false, date_envoi: new Date().toISOString(), piece_jointe_url: null };
       if (!db.messages) db.messages = [];
       db.messages.push(message);
       const idx = db.conversations.findIndex(c => c.id === conversation.id);
       if (expediteurId === conversation.client_id) db.conversations[idx].non_lus_prestataire = (db.conversations[idx].non_lus_prestataire || 0) + 1;
       else db.conversations[idx].non_lus_client = (db.conversations[idx].non_lus_client || 0) + 1;
-      db.conversations[idx].dernier_message = contenu;
+      db.conversations[idx].dernier_message = type === 'audio' ? '🎤 Message vocal' : contenu;
       db.conversations[idx].dernier_message_date = message.date_envoi;
       write(db);
       const destinataireSocketId = global.onlineUsers.get(destinataireId);
@@ -117,19 +145,19 @@ io.on('connection', (socket) => {
 app.get('/api/status', (req, res) => res.json({ status: 'online', compatible2G: true, compatible3G: true, compatible4G: true }));
 app.get('/', (req, res) => res.json({ message: '🚀 Serveur ServiLink en ligne !' }));
 
-// ==================== INSCRIPTION ====================
+// ==================== INSCRIPTION (avec fcmToken) ====================
 app.post('/api/users/register', (req, res) => {
   const db = read();
   if (db.users.find(u => u.email === req.body.email)) return res.status(400).json({ message: 'Email déjà utilisé' });
   if (db.users.find(u => u.telephone === req.body.telephone)) return res.status(400).json({ message: 'Numéro déjà utilisé' });
   const codeParrainage = 'SL' + Math.random().toString(36).substring(2, 8).toUpperCase();
   const isPrestataire = (req.body.role === 'prestataire');
-  if (!req.body.identite || !req.body.identite.videoIdentite) return res.status(400).json({ success: false, message: 'Vidéo d\'identité obligatoire.' });
+  if (isPrestataire && (!req.body.identite || !req.body.identite.videoIdentite)) return res.status(400).json({ success: false, message: 'Vidéo d\'identité obligatoire.' });
   if (isPrestataire && (!req.body.certifications || !req.body.certifications.videoDiplome)) return res.status(400).json({ success: false, message: 'Vidéo de diplôme obligatoire.' });
   const user = { 
-    id: Date.now().toString(), nom: req.body.nom, prenom: req.body.prenom, email: req.body.email, telephone: req.body.telephone, password: req.body.password, role: req.body.role || 'client', bio: '', adresse: { quartier: '', ville: '' }, verified: false,
-    identite: { typePiece: req.body.identite.typePiece || 'cni', numeroPiece: req.body.identite.numeroPiece || '', nomComplet: req.body.identite.nomComplet || '', dateNaissance: req.body.identite.dateNaissance || '', dateExpiration: req.body.identite.dateExpiration || '', lieuDelivrance: req.body.identite.lieuDelivrance || '', videoIdentite: req.body.identite.videoIdentite || '', photoRecto: req.body.identite.photoRecto || '', photoVerso: req.body.identite.photoVerso || '', statutVerification: 'en_attente', dateSoumission: new Date().toISOString(), commentaireAdmin: '' },
-    certifications: isPrestataire ? [{ id: 'cert_' + Date.now(), typeDiplome: req.body.certifications.typeDiplome || '', intitule: req.body.certifications.intitule || '', etablissement: req.body.certifications.etablissement || '', anneeObtention: req.body.certifications.anneeObtention || '', mention: req.body.certifications.mention || '', videoDiplome: req.body.certifications.videoDiplome || '', photoDiplome: req.body.certifications.photoDiplome || '', statutVerification: 'en_attente', dateSoumission: new Date().toISOString(), commentaireAdmin: '' }] : [],
+    id: Date.now().toString(), nom: req.body.nom, prenom: req.body.prenom, email: req.body.email, telephone: req.body.telephone, password: req.body.password, role: req.body.role || 'client', sexe: req.body.sexe || 'Homme', bio: '', adresse: { quartier: '', ville: '' }, verified: false, fcmToken: req.body.fcmToken || '',
+    identite: isPrestataire ? { typePiece: (req.body.identite || {}).typePiece || 'cni', numeroPiece: (req.body.identite || {}).numeroPiece || '', nomComplet: (req.body.identite || {}).nomComplet || '', dateNaissance: (req.body.identite || {}).dateNaissance || '', dateExpiration: (req.body.identite || {}).dateExpiration || '', lieuDelivrance: (req.body.identite || {}).lieuDelivrance || '', videoIdentite: (req.body.identite || {}).videoIdentite || '', photoRecto: (req.body.identite || {}).photoRecto || '', photoVerso: (req.body.identite || {}).photoVerso || '', statutVerification: 'en_attente', dateSoumission: new Date().toISOString(), commentaireAdmin: '' } : null,
+    certifications: isPrestataire ? [{ id: 'cert_' + Date.now(), typeDiplome: (req.body.certifications || {}).typeDiplome || '', intitule: (req.body.certifications || {}).intitule || '', etablissement: (req.body.certifications || {}).etablissement || '', anneeObtention: (req.body.certifications || {}).anneeObtention || '', mention: (req.body.certifications || {}).mention || '', videoDiplome: (req.body.certifications || {}).videoDiplome || '', photoDiplome: (req.body.certifications || {}).photoDiplome || '', statutVerification: 'en_attente', dateSoumission: new Date().toISOString(), commentaireAdmin: '' }] : [],
     reportCount: 0, blocked: false, trustScore: 0, totalDette: 0, codeParrainage, pointsFidelite: 0, codeParrainageUtilise: req.body.codeParrainage || '', cautionPayee: isPrestataire ? false : true, visible: isPrestataire ? false : true, commandesReussies: 0, modeEspecesAutorise: false, badgeVerifie: false, premium: null, messageVerification: 'Vérification en cours.', createdAt: new Date().toISOString()
   };
   if (req.body.codeParrainage && req.body.codeParrainage !== '') {
@@ -143,7 +171,7 @@ app.post('/api/users/register', (req, res) => {
 // ==================== ADMIN VÉRIFICATIONS ====================
 app.put('/api/admin/verification-identite/:userId', (req, res) => {
   const db = read(); const user = db.users.find(u => u.id === req.params.userId);
-  if (!user) return res.status(404).json({ success: false, message: 'Non trouvé' });
+  if (!user || !user.identite) return res.status(404).json({ success: false, message: 'Non trouvé' });
   const { statut, commentaire } = req.body;
   if (!['approuve', 'rejete'].includes(statut)) return res.status(400).json({ success: false, message: 'Statut invalide' });
   user.identite.statutVerification = statut; user.identite.commentaireAdmin = commentaire || ''; user.identite.dateVerification = new Date().toISOString();
@@ -157,8 +185,9 @@ app.put('/api/admin/verification-diplome/:userId', (req, res) => {
   if (!user || user.role !== 'prestataire') return res.status(404).json({ success: false, message: 'Non trouvé' });
   const { statut, commentaire } = req.body;
   if (!['approuve', 'rejete'].includes(statut)) return res.status(400).json({ success: false, message: 'Statut invalide' });
+  if (!user.certifications || !user.certifications[0]) return res.status(404).json({ success: false, message: 'Aucune certification' });
   user.certifications[0].statutVerification = statut; user.certifications[0].commentaireAdmin = commentaire || '';
-  if (user.identite.statutVerification === 'approuve' && statut === 'approuve') { user.visible = true; user.badgeVerifie = true; }
+  if (user.identite?.statutVerification === 'approuve' && statut === 'approuve') { user.visible = true; user.badgeVerifie = true; }
   else if (statut === 'rejete') user.messageVerification = '❌ Diplôme rejeté';
   write(db); res.json({ success: true, user });
 });
@@ -186,17 +215,33 @@ app.post('/api/services', (req, res) => {
   const db = read(); const p = db.users.find(u => u.id === req.body.prestataireId);
   if (p?.blocked) return res.status(403).json({ message: 'Bloqué' });
   if (p && !p.visible) return res.status(403).json({ message: 'Non visible' });
-  const s = { id: Date.now().toString(), ...req.body, devise: 'FCFA', estDisponible: true, ville: p?.adresse?.ville || '', createdAt: new Date().toISOString() };
+  const s = { id: Date.now().toString(), ...req.body, devise: 'FCFA', estDisponible: true, stock: parseInt(req.body.stock) || 0, stockInitial: parseInt(req.body.stock) || 0, ville: p?.adresse?.ville || '', createdAt: new Date().toISOString() };
   db.services.push(s); write(db); res.status(201).json(s);
+});
+
+app.put('/api/services/:id/stock', (req, res) => {
+  const db = read();
+  const service = db.services.find(s => s.id === req.params.id);
+  if (!service) return res.status(404).json({ success: false });
+  service.stock = parseInt(req.body.stock) || 0;
+  service.estDisponible = service.stock > 0;
+  write(db);
+  res.json({ success: true, service });
 });
 
 app.post('/api/orders', (req, res) => {
   const db = read();
+  const service = db.services.find(s => s.id === req.body.serviceId);
+  if (service && service.stock !== undefined && service.stock < (parseInt(req.body.quantite) || 1)) {
+    return res.status(400).json({ message: 'Stock insuffisant' });
+  }
+  if (service) { service.stock -= (parseInt(req.body.quantite) || 1); if (service.stock <= 0) service.estDisponible = false; }
   const prixTotal = parseFloat(req.body.prixTotal) || 0;
   const estUrgent = req.body.estUrgent === true;
   const commission = estUrgent ? prixTotal * 0.12 : prixTotal * 0.10;
-  const order = { id: Date.now().toString(), ...req.body, statut: 'en_attente', commission, commissionPayee: false, adresseVisible: false, adresseReelle: req.body.adresseLivraison, estUrgent, momoReferenceId: null, momoStatus: null, commissionPrelevee: 0, createdAt: new Date().toISOString() };
+  const order = { id: Date.now().toString(), ...req.body, statut: 'en_attente', commission, commissionPayee: false, adresseVisible: false, adresseReelle: req.body.adresseLivraison, estUrgent, momoReferenceId: null, momoStatus: null, commissionPrelevee: 0, paiementLibere: false, createdAt: new Date().toISOString() };
   db.orders.push(order); write(db);
+  sendPush(req.body.prestataireId, '📦 Nouvelle commande !', `${req.body.serviceNom || 'Un client'} a commandé`);
   res.status(201).json({ ...order, adresseLivraison: 'Visible après paiement' });
 });
 
@@ -231,6 +276,50 @@ app.get('/api/orders/momo-status/:referenceId', async (req, res) => {
         }
         res.json({ success: true, referenceId: req.params.referenceId, statut: status });
     } catch (error) { res.status(500).json({ success: false, message: 'Erreur' }); }
+});
+
+// ==================== PREUVES ====================
+app.post('/api/orders/:id/preuve-prestataire', (req, res) => {
+  const db = read();
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Commande non trouvée' });
+  order.preuvePrestataire = req.body.preuveUrl;
+  order.statut = 'preuve_prestataire_fournie';
+  write(db);
+  console.log(`📸 Preuve prestataire reçue pour commande ${order.id}`);
+  res.json({ success: true, message: 'Preuve prestataire envoyée' });
+});
+
+app.post('/api/orders/:id/preuve-client', (req, res) => {
+  const db = read();
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Commande non trouvée' });
+  order.preuveClient = req.body.preuveUrl;
+  order.statut = 'preuves_fournies';
+  write(db);
+  console.log(`📸 Preuve client reçue pour commande ${order.id}`);
+  res.json({ success: true, message: 'Preuve client envoyée' });
+});
+
+// ==================== FACTURE ====================
+app.get('/api/orders/:id/facture', (req, res) => {
+  const db = read();
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ success: false });
+  const client = db.users.find(u => u.id === order.clientId);
+  const prestataire = db.users.find(u => u.id === order.prestataireId);
+  const facture = {
+    id: 'FAC-' + order.id.substring(0, 8),
+    date: order.createdAt,
+    client: { nom: order.clientNom, telephone: client?.telephone },
+    prestataire: { nom: order.prestataireNom || '', telephone: prestataire?.telephone },
+    service: order.serviceNom,
+    montant: order.prixTotal,
+    commission: order.commission,
+    modePaiement: order.modePaiement,
+    statut: order.statut,
+  };
+  res.json({ success: true, facture });
 });
 
 // ==================== PREMIUM, BOOST & PUBLICITÉ AVEC MOMO ====================
@@ -299,6 +388,90 @@ app.get('/api/publicites/actives', (req, res) => {
   res.json({ success: true, publicites: (db.publicites || []).filter(p => p.active && new Date(p.dateFin) > now) });
 });
 
+// ==================== PAIEMENT SÉQUESTRE ====================
+app.put('/api/orders/:id/valider', (req, res) => {
+  const db = read();
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Commande non trouvée' });
+  order.statut = 'termine';
+  order.paiementLibere = true;
+  write(db);
+  sendPush(order.clientId, '✅ Commande terminée', `Votre commande "${order.serviceNom}" est terminée`);
+  sendPush(order.prestataireId, '💰 Paiement libéré', `Le paiement pour "${order.serviceNom}" a été libéré`);
+  console.log(`✅ Paiement libéré pour la commande ${order.id}`);
+  res.json({ success: true, message: 'Paiement libéré au prestataire', order });
+});
+
+// ==================== STORIES/REELS ====================
+app.post('/api/stories', (req, res) => {
+  const db = read();
+  const story = {
+    id: 'st_' + Date.now(),
+    prestataireId: req.body.prestataireId,
+    prestataireNom: req.body.prestataireNom || '',
+    videoUrl: req.body.videoUrl || '',
+    photoUrl: req.body.photoUrl || '',
+    description: req.body.description || '',
+    dateCreation: new Date().toISOString(),
+    dateExpiration: new Date(Date.now() + 86400000).toISOString(),
+  };
+  if (!db.stories) db.stories = [];
+  db.stories.push(story);
+  write(db);
+  res.status(201).json({ success: true, story });
+});
+
+app.get('/api/stories/actives', (req, res) => {
+  const db = read();
+  const now = new Date();
+  const stories = (db.stories || []).filter(s => new Date(s.dateExpiration) > now);
+  const enriched = stories.map(s => {
+    const p = db.users.find(u => u.id === s.prestataireId);
+    return { ...s, prestataireNom: p ? `${p.prenom} ${p.nom}` : s.prestataireNom };
+  });
+  res.json({ success: true, stories: enriched });
+});
+
+// ==================== DEVIS ====================
+app.post('/api/devis', (req, res) => {
+  const db = read();
+  const devis = { id: 'dev_' + Date.now(), clientId: req.body.clientId, description: req.body.description, photos: req.body.photos || [], budgetMin: req.body.budgetMin || 0, budgetMax: req.body.budgetMax || 0, ville: req.body.ville || '', categorie: req.body.categorie || '', statut: 'ouvert', propositions: [], dateCreation: new Date().toISOString() };
+  if (!db.devis) db.devis = []; db.devis.push(devis); write(db);
+  res.status(201).json({ success: true, devis });
+});
+
+app.get('/api/devis', (req, res) => { const db = read(); res.json({ success: true, devis: (db.devis || []).filter(d => d.statut === 'ouvert') }); });
+
+app.post('/api/devis/:id/proposer', (req, res) => {
+  const db = read(); const devis = db.devis.find(d => d.id === req.params.id);
+  if (!devis) return res.status(404).json({ success: false });
+  devis.propositions.push({ prestataireId: req.body.prestataireId, prestataireNom: req.body.prestataireNom, prix: req.body.prix, message: req.body.message || '', date: new Date().toISOString() }); write(db);
+  res.json({ success: true, devis });
+});
+
+// ==================== DASHBOARD PRESTATAIRE ====================
+app.get('/api/prestataire/stats/:userId', (req, res) => {
+  const db = read();
+  const orders = db.orders.filter(o => o.prestataireId === req.params.userId);
+  const today = new Date().toISOString().split('T')[0];
+  const stats = {
+    totalCommandes: orders.length,
+    commandesJour: orders.filter(o => o.createdAt?.startsWith(today)).length,
+    commandesTerminees: orders.filter(o => o.statut === 'termine').length,
+    revenusTotal: orders.reduce((s, o) => s + (o.prixTotal || 0), 0),
+    commissionsTotal: orders.reduce((s, o) => s + (o.commission || 0), 0),
+    noteMoyenne: 0,
+  };
+  res.json({ success: true, stats });
+});
+
+// ==================== TOP PRESTATAIRES ====================
+app.get('/api/top-prestataires', (req, res) => {
+  const db = read();
+  const top = db.users.filter(u => u.role === 'prestataire' && u.commandesReussies >= 5).sort((a, b) => b.trustScore - a.trustScore).slice(0, 10).map(u => ({ id: u.id, nom: u.nom, prenom: u.prenom, trustScore: u.trustScore, commandesReussies: u.commandesReussies }));
+  res.json({ success: true, top });
+});
+
 // ==================== LITIGES & TRANSACTIONS ====================
 app.post('/api/litiges', (req, res) => {
   const db = read(); const order = db.orders.find(o => o.id === req.body.orderId);
@@ -355,19 +528,34 @@ app.get('/api/users/prestataires', (req, res) => res.json(read().users.filter(u 
 app.get('/api/paiement/config', (req, res) => res.json({ success: true, mode: MOMO_CONFIG.mode, destinataire: MOMO_CONFIG.votreNumeroMoMo, devise: 'XAF', pays: 'Cameroun', pourcentageCommissionNormal: 10, pourcentageCommissionUrgent: 12, parrainage: 500 }));
 app.get('/api/referral/:id', (req, res) => { const db = read(); const user = db.users.find(u => u.id === req.params.id); res.json({ code: user?.codeParrainage, points: user?.pointsFidelite || 0 }); });
 
+// ==================== ENVOI CODE SMS ====================
+app.post('/api/send-code', (req, res) => {
+  const code = Math.floor(1000 + Math.random() * 9000).toString();
+  console.log(`📱 Code SMS pour ${req.body.telephone}: ${code}`);
+  res.json({ success: true, code: code });
+});
+
 // ==================== DÉMARRAGE ====================
 const PORT = process.env.PORT || 5002;
 server.listen(PORT, () => {
   console.log(`🚀 Serveur ServiLink démarré sur le port ${PORT}`);
   console.log(`✅ WebSocket Socket.io prêt`);
+  console.log(`🔔 Notifications push ${fcmReady ? 'ACTIVÉES' : 'non configurées'}`);
   console.log(`💳 Paiement Mobile Money Cameroun INTÉGRÉ`);
+  console.log(`📸 Système de preuves (client + prestataire) ACTIVÉ`);
+  console.log(`📄 Factures ACTIVÉES`);
+  console.log(`🔒 Paiement séquestre ACTIVÉ`);
+  console.log(`📱 Stories/Reels ACTIVÉES`);
+  console.log(`📝 Devis ACTIVÉS`);
+  console.log(`📊 Dashboard prestataire ACTIVÉ`);
+  console.log(`🏆 Top Prestataires ACTIVÉ`);
   console.log(`🆔 Vérification identité ACTIVÉE`);
   console.log(`🎓 Certification diplômes ACTIVÉE`);
+  console.log(`📦 Gestion de stock ACTIVÉE`);
   console.log(`⭐ Premium, 📢 Boost, 📺 Publicités avec MoMo ACTIVÉS`);
   console.log(`⚠️ Litiges et Transactions ACTIVÉS`);
   console.log(`📡 Mode: ${MOMO_CONFIG.mode}`);
   console.log(`💰 Commission: 10% / 12% | Parrainage: 500 FCFA`);
   console.log(`💵 Argent vers: ${MOMO_CONFIG.votreNumeroMoMo}`);
   console.log(`📡 API: http://localhost:${PORT}`);
-}); 
-"" 
+});
