@@ -369,4 +369,5 @@ server.listen(PORT, () => {
   console.log(`💰 Commission: 10% / 12% | Parrainage: 500 FCFA`);
   console.log(`💵 Argent vers: ${MOMO_CONFIG.votreNumeroMoMo}`);
   console.log(`📡 API: http://localhost:${PORT}`);
-});
+}); 
+"" 
