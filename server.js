@@ -515,12 +515,43 @@ app.post('/api/send-code', (req, res) => {
   res.json({ success: true, code: code });
 });
 
+// ==================== GAINS PRESTATAIRE ====================
+app.get('/api/prestataire/gains/:userId', (req, res) => {
+  const db = read();
+  const orders = db.orders.filter(o => o.prestataireId === req.params.userId && o.paiementLibere === true);
+  const totalGains = orders.reduce((s, o) => s + (parseFloat(o.prixTotal) || 0), 0);
+  const totalCommissions = orders.reduce((s, o) => s + (parseFloat(o.commission) || 0), 0);
+  const now = new Date();
+  const debutMois = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+  const ordersMois = orders.filter(o => o.createdAt >= debutMois);
+  const gainsMois = ordersMois.reduce((s, o) => s + (parseFloat(o.prixTotal) || 0), 0);
+  const commissionsMois = ordersMois.reduce((s, o) => s + (parseFloat(o.commission) || 0), 0);
+  const enAttente = db.orders.filter(o => o.prestataireId === req.params.userId && ['termine', 'preuves_fournies', 'preuve_prestataire_fournie'].includes(o.statut) && !o.paiementLibere);
+  const gainsEnAttente = enAttente.reduce((s, o) => s + (parseFloat(o.prixTotal) || 0), 0);
+  res.json({ success: true, totalGains, totalCommissions, gainNet: totalGains - totalCommissions, gainsMois, commissionsMois, gainNetMois: gainsMois - commissionsMois, gainsEnAttente, nombreCommandes: orders.length, nombreCommandesMois: ordersMois.length, commandes: orders.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 20) });
+});
+
+// ==================== MESSAGES NON LUS ====================
+app.get('/api/chat/non-lus/:userId', (req, res) => {
+  const db = read();
+  let total = 0;
+  if (db.conversations) {
+    for (const conv of db.conversations) {
+      if (conv.client_id === req.params.userId) total += (conv.non_lus_client || 0);
+      else if (conv.prestataire_id === req.params.userId) total += (conv.non_lus_prestataire || 0);
+    }
+  }
+  res.json({ success: true, total });
+});
+
 // ==================== DÉMARRAGE ====================
 const PORT = process.env.PORT || 5002;
 server.listen(PORT, () => {
   console.log(`🚀 Serveur ServiLink démarré sur le port ${PORT}`);
   console.log(`✅ WebSocket Socket.io prêt`);
   console.log(`🔔 Notifications push ${fcmReady ? 'ACTIVÉES' : 'non configurées'}`);
+  console.log(`💰 Mes Gains ACTIVÉS`);
+  console.log(`🛎️ Badge notifications ACTIVÉ`);
   console.log(`💳 Paiement Mobile Money Cameroun INTÉGRÉ`);
   console.log(`📸 Système de preuves (client + prestataire) ACTIVÉ`);
   console.log(`📄 Factures ACTIVÉES`);
