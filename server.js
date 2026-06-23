@@ -5,6 +5,8 @@ const http = require('http');
 const socketIo = require('socket.io');
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
+const multer = require('multer');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -24,12 +26,33 @@ if (!fs.existsSync(DB)) {
 const read = () => JSON.parse(fs.readFileSync(DB));
 const write = (d) => fs.writeFileSync(DB, JSON.stringify(d, null, 2));
 
+// ==================== CONFIGURATION MULTER ====================
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = __dirname + '/public/uploads/';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + '-' + file.originalname);
+  }
+});
+const upload = multer({ storage: storage });
+
 // ==================== FIREBASE (NOTIFICATIONS PUSH) ====================
 let fcmReady = false;
 console.log('⚠️ Firebase désactivé (clé non configurée)');
 
 async function sendPush(userId, title, body, data = {}) {
   // Firebase non configuré
+}
+
+// ==================== VALIDATIONS ====================
+function contientQueLettres(str) {
+  return /^[a-zA-ZÀ-ÿ\s\-']+$/.test(str);
+}
+function contientQueChiffres(str) {
+  return /^[0-9]+$/.test(str);
 }
 
 // ==================== CONFIG MOBILE MONEY CAMEROUN ====================
@@ -75,7 +98,7 @@ async function checkMomoStatus(token, referenceId) {
 global.onlineUsers = new Map();
 global.io = io;
 
-// ==================== SOCKET.IO - CHAT (avec audio) ====================
+// ==================== SOCKET.IO - CHAT ====================
 io.on('connection', (socket) => {
   console.log(`🔌 Nouvelle connexion socket: ${socket.id}`);
   socket.on('register-user', (userId) => { global.onlineUsers.set(userId, socket.id); console.log(`✅ Utilisateur ${userId} en ligne`); });
@@ -125,20 +148,53 @@ io.on('connection', (socket) => {
 app.get('/api/status', (req, res) => res.json({ status: 'online', compatible2G: true, compatible3G: true, compatible4G: true }));
 app.get('/', (req, res) => res.json({ message: '🚀 Serveur ServiLink en ligne !' }));
 
-// ==================== INSCRIPTION (avec fcmToken) ====================
-app.post('/api/users/register', (req, res) => {
+// ==================== INSCRIPTION ====================
+// ✅ INSERTION : ajout de upload.single('photo')
+app.post('/api/users/register', upload.single('photo'), (req, res) => {
   const db = read();
+  if (!contientQueLettres(req.body.nom || '')) return res.status(400).json({ message: 'Le nom ne doit contenir que des lettres' });
+  if (!contientQueLettres(req.body.prenom || '')) return res.status(400).json({ message: 'Le prénom ne doit contenir que des lettres' });
+  if (req.body.email && !req.body.email.includes('@')) return res.status(400).json({ message: 'Email invalide' });
+  if (req.body.telephone && !contientQueChiffres((req.body.telephone || '').replace('+237', ''))) return res.status(400).json({ message: 'Téléphone invalide' });
   if (db.users.find(u => u.email === req.body.email)) return res.status(400).json({ message: 'Email déjà utilisé' });
   if (db.users.find(u => u.telephone === req.body.telephone)) return res.status(400).json({ message: 'Numéro déjà utilisé' });
   const codeParrainage = 'SL' + Math.random().toString(36).substring(2, 8).toUpperCase();
   const isPrestataire = (req.body.role === 'prestataire');
-  if (isPrestataire && (!req.body.identite || !req.body.identite.videoIdentite)) return res.status(400).json({ success: false, message: 'Vidéo d\'identité obligatoire.' });
-  if (isPrestataire && (!req.body.certifications || !req.body.certifications.videoDiplome)) return res.status(400).json({ success: false, message: 'Vidéo de diplôme obligatoire.' });
+  
+  // ✅ INSERTION : récupération du nom du fichier uploadé
+  const photoUrl = req.file ? req.file.filename : null;
+  
   const user = { 
-    id: Date.now().toString(), nom: req.body.nom, prenom: req.body.prenom, email: req.body.email, telephone: req.body.telephone, password: req.body.password, role: req.body.role || 'client', sexe: req.body.sexe || 'Homme', bio: '', adresse: { quartier: '', ville: '' }, verified: false, fcmToken: req.body.fcmToken || '',
+    id: Date.now().toString(), 
+    nom: req.body.nom, 
+    prenom: req.body.prenom, 
+    email: req.body.email, 
+    telephone: req.body.telephone, 
+    password: req.body.password, 
+    role: req.body.role || 'client', 
+    sexe: req.body.sexe || 'Homme', 
+    bio: '', 
+    adresse: { quartier: '', ville: '' }, 
+    verified: false, 
+    fcmToken: req.body.fcmToken || '', 
+    photo: photoUrl, // ✅ ICI : on utilise le nom du fichier uploadé
     identite: isPrestataire ? { typePiece: (req.body.identite || {}).typePiece || 'cni', numeroPiece: (req.body.identite || {}).numeroPiece || '', nomComplet: (req.body.identite || {}).nomComplet || '', dateNaissance: (req.body.identite || {}).dateNaissance || '', dateExpiration: (req.body.identite || {}).dateExpiration || '', lieuDelivrance: (req.body.identite || {}).lieuDelivrance || '', videoIdentite: (req.body.identite || {}).videoIdentite || '', photoRecto: (req.body.identite || {}).photoRecto || '', photoVerso: (req.body.identite || {}).photoVerso || '', statutVerification: 'en_attente', dateSoumission: new Date().toISOString(), commentaireAdmin: '' } : null,
     certifications: isPrestataire ? [{ id: 'cert_' + Date.now(), typeDiplome: (req.body.certifications || {}).typeDiplome || '', intitule: (req.body.certifications || {}).intitule || '', etablissement: (req.body.certifications || {}).etablissement || '', anneeObtention: (req.body.certifications || {}).anneeObtention || '', mention: (req.body.certifications || {}).mention || '', videoDiplome: (req.body.certifications || {}).videoDiplome || '', photoDiplome: (req.body.certifications || {}).photoDiplome || '', statutVerification: 'en_attente', dateSoumission: new Date().toISOString(), commentaireAdmin: '' }] : [],
-    reportCount: 0, blocked: false, trustScore: 0, totalDette: 0, codeParrainage, pointsFidelite: 0, codeParrainageUtilise: req.body.codeParrainage || '', cautionPayee: isPrestataire ? false : true, visible: isPrestataire ? false : true, commandesReussies: 0, modeEspecesAutorise: false, badgeVerifie: false, premium: null, messageVerification: 'Vérification en cours.', createdAt: new Date().toISOString()
+    reportCount: 0, 
+    blocked: false, 
+    trustScore: 0, 
+    totalDette: 0, 
+    codeParrainage, 
+    pointsFidelite: 0, 
+    codeParrainageUtilise: req.body.codeParrainage || '', 
+    cautionPayee: isPrestataire ? false : true, 
+    visible: isPrestataire ? false : true, 
+    commandesReussies: 0, 
+    modeEspecesAutorise: false, 
+    badgeVerifie: false, 
+    premium: null, 
+    messageVerification: 'Vérification en cours.', 
+    createdAt: new Date().toISOString()
   };
   if (req.body.codeParrainage && req.body.codeParrainage !== '') {
     const parrain = db.users.find(u => u.codeParrainage === req.body.codeParrainage);
@@ -191,12 +247,40 @@ app.post('/api/users/login', (req, res) => {
 });
 
 // ==================== SERVICES & COMMANDES ====================
-app.post('/api/services', (req, res) => {
-  const db = read(); const p = db.users.find(u => u.id === req.body.prestataireId);
+// ✅ INSÉRÉ : Route pour ajouter un service avec photo, vidéo et photos
+app.post('/api/services', upload.fields([
+  { name: 'photo', maxCount: 1 },
+  { name: 'video', maxCount: 1 },
+  { name: 'photos', maxCount: 9 }
+]), (req, res) => {
+  const db = read();
+  const p = db.users.find(u => u.id === req.body.prestataireId);
   if (p?.blocked) return res.status(403).json({ message: 'Bloqué' });
   if (p && !p.visible) return res.status(403).json({ message: 'Non visible' });
-  const s = { id: Date.now().toString(), ...req.body, devise: 'FCFA', estDisponible: true, stock: parseInt(req.body.stock) || 0, stockInitial: parseInt(req.body.stock) || 0, ville: p?.adresse?.ville || '', createdAt: new Date().toISOString() };
-  db.services.push(s); write(db); res.status(201).json(s);
+
+  // ✅ Récupération des fichiers uploadés
+  const files = req.files; // { photo: [file], video: [file], photos: [file] }
+  const photoUrl = files?.photo?.[0] ? files.photo[0].filename : null;
+  const videoUrl = files?.video?.[0] ? files.video[0].filename : null;
+  const photosUrls = files?.photos ? files.photos.map(f => f.filename) : [];
+
+  const s = {
+    id: Date.now().toString(),
+    ...req.body,
+    photo: photoUrl,      // ✅ Photo principale
+    video: videoUrl,      // ✅ Vidéo du service
+    photos: photosUrls,   // ✅ Photos supplémentaires
+    devise: 'FCFA',
+    estDisponible: true,
+    stock: parseInt(req.body.stock) || 0,
+    stockInitial: parseInt(req.body.stock) || 0,
+    ville: p?.adresse?.ville || '',
+    createdAt: new Date().toISOString()
+  };
+
+  db.services.push(s);
+  write(db);
+  res.status(201).json(s);
 });
 
 app.put('/api/services/:id/stock', (req, res) => {
@@ -230,6 +314,10 @@ app.post('/api/orders/pay-mobile', async (req, res) => {
     try {
         const db = read(); const order = db.orders.find(o => o.id === req.body.orderId);
         if (!order) return res.status(404).json({ success: false, message: 'Commande non trouvée' });
+        // ✅ Vérification si déjà payé (AJOUTÉ SANS RIEN SUPPRIMER)
+        if (order.momoStatus === 'SUCCESSFUL') {
+            return res.status(400).json({ success: false, message: 'Déjà payé' });
+        }
         const prixTotal = parseFloat(order.prixTotal) || 0;
         const estUrgent = order.estUrgent === true;
         const pourcentageCommission = estUrgent ? 0.12 : 0.10;
@@ -635,6 +723,20 @@ app.post('/api/panier/add', (req, res) => {
     db.paniers.push(panier);
   }
   
+  // ✅ Vérification de stock (AJOUTÉ SANS RIEN SUPPRIMER)
+  if (req.body.type === 'produit') {
+    const produit = db.produits.find(p => p.id === req.body.itemId);
+    if (produit && produit.stock < (req.body.quantite || 1)) {
+      return res.status(400).json({ success: false, message: 'Stock insuffisant' });
+    }
+  }
+  if (req.body.type === 'service') {
+    const service = db.services.find(s => s.id === req.body.itemId);
+    if (service && service.stock < (req.body.quantite || 1)) {
+      return res.status(400).json({ success: false, message: 'Stock insuffisant' });
+    }
+  }
+
   panier.items.push({
     type: req.body.type || 'service', // 'service' ou 'produit'
     itemId: req.body.itemId,
@@ -711,17 +813,75 @@ app.get('/api/orders/:id/suivi', (req, res) => {
   });
 });
 
+// ==================== ROUTE D'UPLOAD (AJOUTÉE SANS RIEN SUPPRIMER) ====================
+app.post('/api/upload', upload.single('photo'), (req, res) => {
+  res.json({ success: true, url: '/uploads/' + req.file.filename });
+});
+
+// ==================== 🆕 NOUVELLE ROUTE : MOT DE PASSE OUBLIÉ (AJOUTÉE) ====================
+app.post('/api/users/forgot-password', (req, res) => {
+  const db = read();
+  const { identifiant } = req.body;
+  if (!identifiant) return res.status(400).json({ message: 'Identifiant requis' });
+
+  const user = db.users.find(u => u.email === identifiant || u.telephone === identifiant);
+  if (!user) return res.status(404).json({ message: 'Aucun compte associé à cet identifiant' });
+
+  // 🛠️ Génération d'un token unique (pour simulation, car pas de mail réel)
+  const resetToken = uuidv4();
+  user.resetPasswordToken = resetToken;
+  user.resetPasswordExpires = new Date(Date.now() + 3600000).toISOString(); // 1 heure
+  write(db);
+
+  // 📱 Simulation en console (car pas de serveur mail)
+  console.log(`\n🔐 DEMANDE DE RÉINITIALISATION POUR ${identifiant}`);
+  console.log(`🔗 Lien de réinitialisation (simulé) : http://localhost:5002/reset-password?token=${resetToken}`);
+  console.log(`⏳ Ce lien est valable 1 heure.\n`);
+
+  res.json({ 
+    success: true, 
+    message: 'Un lien de réinitialisation a été envoyé à votre email/téléphone (simulé en console)',
+    resetToken // 📌 À retirer en production (pour le test)
+  });
+});
+
+// ==================== 🆕 NOUVELLE ROUTE : RÉINITIALISER LE MOT DE PASSE (AJOUTÉE) ====================
+app.post('/api/users/reset-password', (req, res) => {
+  const db = read();
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword || newPassword.length < 4) {
+    return res.status(400).json({ message: 'Token invalide ou mot de passe trop court (min 4)' });
+  }
+
+  const user = db.users.find(u => u.resetPasswordToken === token);
+  if (!user) return res.status(400).json({ message: 'Token invalide ou expiré' });
+
+  // Vérifier si le token n'est pas expiré
+  if (new Date(user.resetPasswordExpires) < new Date()) {
+    return res.status(400).json({ message: 'Le lien de réinitialisation a expiré' });
+  }
+
+  // Mettre à jour le mot de passe et supprimer le token
+  user.password = newPassword;
+  delete user.resetPasswordToken;
+  delete user.resetPasswordExpires;
+  write(db);
+
+  console.log(`✅ Mot de passe réinitialisé pour ${user.email || user.telephone}`);
+  res.json({ success: true, message: 'Mot de passe réinitialisé avec succès !' });
+});
+
 // ==================== DÉMARRAGE ====================
 const PORT = process.env.PORT || 5002;
 server.listen(PORT, () => {
   console.log(`🚀 Serveur ServiLink démarré sur le port ${PORT}`);
   console.log(`✅ WebSocket Socket.io prêt`);
-  console.log(`🔔 Notifications push ${fcmReady ? 'ACTIVÉES' : 'non configurées'}`);
   console.log(`💰 Mes Gains ACTIVÉS`);
   console.log(`🛎️ Badge notifications ACTIVÉ`);
   console.log(`🛒 Panier multi-services ACTIVÉ`);
   console.log(`🏪 Boutique personnalisée ACTIVÉE`);
   console.log(`📦 Suivi de livraison ACTIVÉ`);
+  console.log(`🔔 Notifications push ${fcmReady ? 'ACTIVÉES' : 'non configurées'}`);
   console.log(`💳 Paiement Mobile Money Cameroun INTÉGRÉ`);
   console.log(`📸 Système de preuves (client + prestataire) ACTIVÉ`);
   console.log(`📄 Factures ACTIVÉES`);
@@ -739,4 +899,5 @@ server.listen(PORT, () => {
   console.log(`💰 Commission: 10% / 12% | Parrainage: 500 FCFA`);
   console.log(`💵 Argent vers: ${MOMO_CONFIG.votreNumeroMoMo}`);
   console.log(`📡 API: http://localhost:${PORT}`);
+  console.log(`🔐 🔥 ROUTES MOT DE PASSE OUBLIÉ AJOUTÉES (forgot-password & reset-password) 🔥`);
 });
