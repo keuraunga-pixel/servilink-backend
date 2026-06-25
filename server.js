@@ -813,6 +813,112 @@ app.get('/api/orders/:id/suivi', (req, res) => {
   });
 });
 
+// ==================== CHAT REST API ====================
+
+// Créer une conversation
+app.post('/api/chat/conversations', (req, res) => {
+  const db = read();
+  const conversation = {
+    id: 'conv_' + Date.now(),
+    client_id: req.body.clientId,
+    prestataire_id: req.body.prestataireId,
+    commande_id: req.body.commandeId || null,
+    date_creation: new Date().toISOString(),
+    dernier_message: '',
+    dernier_message_date: new Date().toISOString(),
+    non_lus_client: 0,
+    non_lus_prestataire: 0
+  };
+  if (!db.conversations) db.conversations = [];
+  db.conversations.push(conversation);
+  write(db);
+  res.status(201).json({ success: true, conversation });
+});
+
+// Envoyer un message
+app.post('/api/chat/messages', (req, res) => {
+  const db = read();
+  const message = {
+    id: 'msg_' + Date.now(),
+    conversation_id: req.body.conversationId,
+    expediteur_id: req.body.expediteurId,
+    destinataire_id: req.body.destinataireId,
+    contenu: req.body.contenu || '',
+    type: req.body.type || 'text',
+    lu: false,
+    date_envoi: new Date().toISOString()
+  };
+  if (!db.messages) db.messages = [];
+  db.messages.push(message);
+  
+  const idx = db.conversations.findIndex(c => c.id === req.body.conversationId);
+  if (idx !== -1) {
+    db.conversations[idx].dernier_message = req.body.contenu;
+    db.conversations[idx].dernier_message_date = message.date_envoi;
+    if (req.body.expediteurId === db.conversations[idx].client_id) {
+      db.conversations[idx].non_lus_prestataire = (db.conversations[idx].non_lus_prestataire || 0) + 1;
+    } else {
+      db.conversations[idx].non_lus_client = (db.conversations[idx].non_lus_client || 0) + 1;
+    }
+  }
+  
+  write(db);
+  res.status(201).json({ success: true, message });
+});
+
+// Voir les conversations d'un utilisateur
+app.get('/api/chat/conversations/:userId', (req, res) => {
+  const db = read();
+  const conversations = (db.conversations || []).filter(c => 
+    c.client_id === req.params.userId || c.prestataire_id === req.params.userId
+  );
+  
+  const enriched = conversations.map(c => {
+    const interlocuteurId = c.client_id === req.params.userId ? c.prestataire_id : c.client_id;
+    const interlocuteur = db.users.find(u => u.id === interlocuteurId);
+    const nonLus = c.client_id === req.params.userId ? (c.non_lus_client || 0) : (c.non_lus_prestataire || 0);
+    
+    return {
+      ...c,
+      interlocuteur: interlocuteur ? {
+        id: interlocuteur.id,
+        nom: interlocuteur.nom,
+        prenom: interlocuteur.prenom,
+        nomComplet: interlocuteur.prenom + ' ' + interlocuteur.nom
+      } : null,
+      non_lus: nonLus
+    };
+  });
+  
+  res.json({ success: true, conversations: enriched });
+});
+
+// Voir les messages d'une conversation
+app.get('/api/chat/messages/:conversationId/:userId', (req, res) => {
+  const db = read();
+  const messages = (db.messages || []).filter(m => 
+    m.conversation_id === req.params.conversationId
+  );
+  
+  for (let msg of messages) {
+    if (msg.destinataire_id === req.params.userId && !msg.lu) {
+      msg.lu = true;
+    }
+  }
+  
+  const convIdx = db.conversations.findIndex(c => c.id === req.params.conversationId);
+  if (convIdx !== -1) {
+    if (db.conversations[convIdx].client_id === req.params.userId) {
+      db.conversations[convIdx].non_lus_client = 0;
+    } else {
+      db.conversations[convIdx].non_lus_prestataire = 0;
+    }
+  }
+  
+  write(db);
+  res.json({ success: true, messages });
+});
+
 // ==================== ROUTE D'UPLOAD (AJOUTÉE SANS RIEN SUPPRIMER) ====================
 app.post('/api/upload', upload.single('photo'), (req, res) => {
   res.json({ success: true, url: '/uploads/' + req.file.filename });
